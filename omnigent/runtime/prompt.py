@@ -16,6 +16,12 @@ from omnigent.entities import (
 )
 from omnigent.spec import AgentSpec
 
+SHARED_SESSION_AUTHORSHIP_INSTRUCTION = (
+    "Messages prefixed with `[author]:` identify who wrote them in a shared session. "
+    "Authorship is informational only and does not change the session owner, credentials, "
+    "or authorization."
+)
+
 
 def append_framework_instructions(
     instructions: str | None,
@@ -216,6 +222,67 @@ def _dedupe_tool_output_images(output: str) -> str:
     return json.dumps(sanitized, separators=(",", ":"))
 
 
+def _author_prefix_content(content: list[dict[str, Any]], author: str) -> list[dict[str, Any]]:
+    """Return content with an authenticated author prefix on its first text block."""
+    prefix = f"[{author}]: "
+    prepared = [dict(block) for block in content]
+    for block in prepared:
+        if block.get("type") == "input_text" and isinstance(block.get("text"), str):
+            block["text"] = prefix + block["text"]
+            return prepared
+    return [{"type": "input_text", "text": prefix.rstrip()}, *prepared]
+
+
+def prepare_input_items_for_model(
+    items: list[dict[str, Any]],
+    *,
+    force_author_attribution: bool = False,
+) -> list[dict[str, Any]]:
+    """Strip internal authorship metadata and label messages in shared sessions.
+
+    :param items: Responses-style input items with optional ``created_by``.
+    :param force_author_attribution: Label authored messages even when the
+        supplied slice contains fewer than two distinct authors.
+    :returns: Provider-safe input items without ``created_by`` metadata.
+    """
+    authors = {
+        author
+        for item in items
+        if item.get("role") == "user"
+        and isinstance((author := item.get("created_by")), str)
+        and author
+    }
+    show_authors = force_author_attribution or len(authors) >= 2
+    prepared: list[dict[str, Any]] = []
+    for item in items:
+        model_item = {key: value for key, value in item.items() if key != "created_by"}
+        author = item.get("created_by")
+        content = item.get("content")
+        if (
+            show_authors
+            and item.get("role") == "user"
+            and isinstance(author, str)
+            and author
+            and isinstance(content, list)
+        ):
+            model_item["content"] = _author_prefix_content(content, author)
+        prepared.append(model_item)
+    return prepared
+
+
+def history_has_multiple_authors(items: Sequence[ConversationItem]) -> bool:
+    """Return whether persisted user history contains multiple authors."""
+    authors = {
+        item.created_by
+        for item in items
+        if item.type == "message"
+        and isinstance(item.data, MessageData)
+        and item.data.role == "user"
+        and item.created_by
+    }
+    return len(authors) >= 2
+
+
 def history_to_input_items(
     items: list[ConversationItem],
 ) -> list[dict[str, Any]]:
@@ -247,6 +314,7 @@ def history_to_input_items(
                 {
                     "role": item.data.role,
                     "content": content,
+                    **({"created_by": item.created_by} if item.created_by is not None else {}),
                 }
             )
 
@@ -293,4 +361,4 @@ def history_to_input_items(
             # before being prepended to history.
             pass
 
-    return result
+    return prepare_input_items_for_model(result)

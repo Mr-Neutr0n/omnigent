@@ -1739,6 +1739,7 @@ async def _persist_external_conversation_item(
             drained = pending_inputs.resolve_oldest(session_id)
         if drained is not None:
             cleared_pending_id = drained.pending_id
+            item = _strip_pending_author_prefix(item, drained.content, drained.created_by)
             item = _merge_pending_file_blocks(item, drained.content)
             # Apply the original sender's identity recorded at POST time.
             # The transcript forwarder is the single writer here and has no
@@ -3168,6 +3169,8 @@ def _build_native_terminal_message_event(
     conv: Conversation,
     body: SessionEventInput,
     model_override: str | None = None,
+    created_by: str | None = None,
+    author_attribution_required: bool = False,
 ) -> dict[str, Any]:
     """
     Build the runner event that delivers a web message to a native TUI.
@@ -3181,6 +3184,9 @@ def _build_native_terminal_message_event(
         so the claude-native executor applies ``/model`` and injects the
         message under one lock (no separate racing ``model_change``
         event). ``None`` when routing did not pick a model.
+    :param created_by: Authenticated identity of the posting actor.
+    :param author_attribution_required: Whether the posting actor is a
+        shared-session collaborator.
     :returns: Harness ``MessageEvent`` body for the runner-local
         native terminal harness, including ``agent_id`` so the runner
         can resolve the harness spec on the first message.
@@ -3207,6 +3213,8 @@ def _build_native_terminal_message_event(
         # harness and is dropped. Match the non-native forward path,
         # which always includes it.
         "agent_id": conv.agent_id,
+        **({"created_by": created_by} if created_by is not None else {}),
+        **({"author_attribution_required": True} if author_attribution_required else {}),
     }
     # Ride the routed model in-band as ``model_override`` (extra field the
     # harness MessageEvent forwards into ExecutorConfig.model). The
@@ -3225,6 +3233,8 @@ async def _forward_native_terminal_message(
     file_store: FileStore | None = None,
     artifact_store: ArtifactStore | None = None,
     model_override: str | None = None,
+    created_by: str | None = None,
+    author_attribution_required: bool = False,
 ) -> None:
     """
     Forward one Omnigent web-chat message to the native terminal harness.
@@ -3248,12 +3258,21 @@ async def _forward_native_terminal_message(
         in-band on the message so the executor applies ``/model`` and the
         inject under one lock (no separate racing ``model_change``).
         ``None`` when routing did not pick a model.
+    :param created_by: Authenticated identity of the posting actor.
+    :param author_attribution_required: Whether the posting actor is a
+        shared-session collaborator.
     :returns: None.
     :raises HTTPException: 502 when the runner or harness rejects
         the injection request.
     """
     display_name, _, _ = _native_terminal_runtime(conv)
-    event = _build_native_terminal_message_event(conv, body, model_override=model_override)
+    event = _build_native_terminal_message_event(
+        conv,
+        body,
+        model_override=model_override,
+        created_by=created_by,
+        author_attribution_required=author_attribution_required,
+    )
     _logger.info(
         "%s terminal message forward starting: session=%s block_types=%s",
         display_name,
@@ -3390,6 +3409,7 @@ async def _forward_event_to_runner(
     artifact_store: ArtifactStore | None = None,
     has_mcp_servers: bool = False,
     created_by: str | None = None,
+    author_attribution_required: bool = False,
 ) -> str:
     """
     Persist a user event and forward it to the runner.
@@ -3418,6 +3438,8 @@ async def _forward_event_to_runner(
         this turn. ``False`` by default (agents without MCP servers).
     :param created_by: Authenticated identity of the posting actor,
         recorded on the persisted item for attribution.
+    :param author_attribution_required: Whether the posting actor is a
+        shared-session collaborator.
     :returns: The store-assigned id of the persisted item.
     """
     import uuid
@@ -3503,6 +3525,8 @@ async def _forward_event_to_runner(
         # PRE-resolution form) and drops it by id, appending its own
         # resolved copy — id-based dedup, not a role/content guess.
         "persisted_item_id": persisted_items[0].id,
+        **({"created_by": created_by} if created_by is not None else {}),
+        **({"author_attribution_required": True} if author_attribution_required else {}),
     }
     # Persist the turn-initiating actor so /policies/evaluate and MCP
     # tools/call can read it back on any server replica.  Skip system-driven
@@ -3792,6 +3816,7 @@ async def _dispatch_session_event_to_runner_impl(
     artifact_store: ArtifactStore | None,
     has_mcp_servers: bool = False,
     created_by: str | None = None,
+    author_attribution_required: bool = False,
     runner_router: RunnerRouter | None = None,
     native_terminal_ready: bool = False,
 ) -> _SessionEventDispatchResult:
@@ -3855,6 +3880,8 @@ async def _dispatch_session_event_to_runner_impl(
         :func:`omnigent.runtime.pending_inputs.record` and applied
         to the item when the forwarder mirrors it back (see
         :func:`_persist_external_conversation_item`).
+    :param author_attribution_required: Whether the authenticated sender is
+        a shared-session collaborator.
     :param runner_router: Router used to resolve the runner for the
         native-terminal parent-wake forward when a sub-agent fails to
         boot (see :func:`_persist_native_terminal_failure`). ``None``
@@ -3974,6 +4001,8 @@ async def _dispatch_session_event_to_runner_impl(
                 file_store=file_store,
                 artifact_store=artifact_store,
                 model_override=_native_routed_model,
+                created_by=created_by,
+                author_attribution_required=author_attribution_required,
             )
             forwarded = True
         finally:
@@ -4009,6 +4038,7 @@ async def _dispatch_session_event_to_runner_impl(
         artifact_store=artifact_store,
         has_mcp_servers=has_mcp_servers,
         created_by=created_by,
+        author_attribution_required=author_attribution_required,
     )
     return _SessionEventDispatchResult(item_id=item_id, pending_id=None)
 

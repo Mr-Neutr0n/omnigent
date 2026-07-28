@@ -6,10 +6,11 @@ from typing import cast
 
 import pytest
 
-from omnigent.entities import ConversationItem, FunctionCallOutputData
+from omnigent.entities import ConversationItem, FunctionCallOutputData, MessageData
 from omnigent.runtime.prompt import (
     append_framework_instructions,
     build_instructions,
+    history_has_multiple_authors,
     history_to_input_items,
 )
 from omnigent.spec import AgentSpec
@@ -25,6 +26,55 @@ def _output_item(output: str) -> ConversationItem:
         type="function_call_output",
         data=FunctionCallOutputData(call_id="c1", output=output),
     )
+
+
+def _message_item(text: str, created_by: str | None) -> ConversationItem:
+    """Build a persisted user message for attribution tests."""
+    return ConversationItem(
+        id=f"i-{text}",
+        status="completed",
+        response_id=f"r-{text}",
+        created_at=1,
+        type="message",
+        data=MessageData(role="user", content=[{"type": "input_text", "text": text}]),
+        created_by=created_by,
+    )
+
+
+def test_history_labels_messages_when_multiple_people_participate() -> None:
+    """Shared-session prompts identify each authenticated human author."""
+    result = history_to_input_items(
+        [
+            _message_item("owner request", "alice@example.com"),
+            _message_item("collaborator request", "bob@example.com"),
+        ]
+    )
+
+    assert result[0]["content"][0]["text"] == "[alice@example.com]: owner request"
+    assert result[1]["content"][0]["text"] == "[bob@example.com]: collaborator request"
+    assert all("created_by" not in item for item in result)
+
+
+def test_history_leaves_single_author_messages_unchanged() -> None:
+    """Private sessions keep their existing prompt text."""
+    result = history_to_input_items(
+        [
+            _message_item("first", "alice@example.com"),
+            _message_item("second", "alice@example.com"),
+        ]
+    )
+
+    assert [item["content"][0]["text"] for item in result] == ["first", "second"]
+    assert all("created_by" not in item for item in result)
+
+
+def test_history_detects_multiple_authenticated_authors() -> None:
+    history = [
+        _message_item("first", "alice@example.com"),
+        _message_item("second", "bob@example.com"),
+    ]
+
+    assert history_has_multiple_authors(history) is True
 
 
 def test_history_replay_strips_inline_base64_image() -> None:

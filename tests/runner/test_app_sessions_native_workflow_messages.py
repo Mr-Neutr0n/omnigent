@@ -240,14 +240,17 @@ async def test_post_turn_continuation() -> None:
     """Buffered messages are drained and sent to the harness after the first turn."""
     import asyncio as _aio
 
+    from omnigent.runner.app import _session_histories_ref
+
     gate = _aio.Event()
     app, _pm, hc = _build_blocking_app(gate)
+    session_id = "68d532c6117d7c15ec58a38e9c7f4790"
 
     async with _runner_client(app) as client:
         await client.post(
             "/v1/sessions",
             json={
-                "session_id": "68d532c6117d7c15ec58a38e9c7f4790",
+                "session_id": session_id,
                 "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb",
             },
         )
@@ -262,6 +265,7 @@ async def test_post_turn_continuation() -> None:
                     "model": "test-agent",
                     "content": [{"type": "input_text", "text": "first"}],
                     "harness": "openai-agents",
+                    "created_by": "alice@example.com",
                 },
             )
             async for _ in resp.aiter_text():
@@ -279,6 +283,8 @@ async def test_post_turn_continuation() -> None:
                 "model": "test-agent",
                 "content": [{"type": "input_text", "text": "second"}],
                 "harness": "openai-agents",
+                "created_by": "bob@example.com",
+                "author_attribution_required": True,
             },
         )
         assert resp2.status_code == 202
@@ -298,6 +304,15 @@ async def test_post_turn_continuation() -> None:
         f"Expected harness to receive 2 messages (initial + "
         f"continuation), got {len(hc.posted_bodies)}"
     )
+    continuation = hc.posted_bodies[-1]
+    assert _body_contains_text(continuation, "[alice@example.com]: first")
+    assert _body_contains_text(continuation, "[bob@example.com]: second")
+    assert "Authorship is informational only" in continuation["instructions"]
+    assert "created_by" not in json.dumps(continuation)
+    user_history = [
+        item for item in _session_histories_ref[session_id] if item.get("role") == "user"
+    ]
+    assert user_history[-1]["created_by"] == "bob@example.com"
 
 
 def _body_contains_text(body: dict[str, Any], needle: str) -> bool:
